@@ -168,7 +168,7 @@ where
 /// into blocks (see `PreparedPolygon`): a cheap point-to-bounding-box lower
 /// bound skips a whole block when it can neither hold a nearer edge nor flip the
 /// ray-cast parity. Most blocks of a ring are far from any given cell centre, so
-/// this skips the bulk of the edges. The per-segment distance is computed by geo.
+/// this skips the bulk of the edges.
 fn signed_distance<T>(point: Point<T>, prepared: &PreparedPolygon<T>) -> T
 where
     T: GeoFloat,
@@ -223,13 +223,36 @@ where
                 }
 
                 if !skip_dist {
-                    min_distance = min_distance.min(Euclidean.distance(&point, line));
+                    min_distance = min_distance.min(segment_distance(point, line));
                 }
             }
         }
     }
 
     if inside { min_distance } else { -min_distance }
+}
+
+/// Euclidean distance to a segment, including repeated vertices.
+/// Follows geo's `geo_types::private_utils::line_segment_distance` implementation.
+fn segment_distance<T: GeoFloat>(point: Point<T>, line: &Line<T>) -> T {
+    let point = point.0;
+    let start = line.start;
+    let end = line.end;
+    if start == end {
+        return (start.x - point.x).hypot(start.y - point.y);
+    }
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let d_squared = dx * dx + dy * dy;
+    let r = ((point.x - start.x) * dx + (point.y - start.y) * dy) / d_squared;
+    if r <= T::zero() {
+        return (start.x - point.x).hypot(start.y - point.y);
+    }
+    if r >= T::one() {
+        return (end.x - point.x).hypot(end.y - point.y);
+    }
+    let s = ((start.y - point.y) * dx - (start.x - point.x) * dy) / d_squared;
+    s.abs() * dx.hypot(dy)
 }
 
 struct QuadTree<T>(pub BinaryHeap<Qcell<T>>)
@@ -415,6 +438,25 @@ mod tests {
     use geo::prelude::*;
     use geo::{LineString, Point, Polygon};
     use std::collections::BinaryHeap;
+
+    #[test]
+    fn segment_distances_match_geo_including_repeated_vertices() {
+        use super::segment_distance;
+        use geo::{Euclidean, Line};
+        for (start, end) in [((1., 2.), (4., 6.)), ((1., 2.), (1., 2.))] {
+            let line: Line<f64> = Line::new(start, end);
+            for point in [Point::new(0., 0.), Point::new(2., 3.), Point::new(10., 10.)] {
+                let expected = Euclidean.distance(&point, &line);
+                assert!((segment_distance(point, &line) - expected).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn segment_distance_uses_exact_endpoints_when_projection_is_clamped() {
+        let line = geo::Line::new((1e16, 0.), (1., 0.));
+        assert_eq!(super::segment_distance(Point::new(0., 0.), &line), 1.);
+    }
 
     #[test]
     fn coarse_tolerance_keeps_the_better_initial_guess() {
