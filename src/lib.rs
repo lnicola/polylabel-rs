@@ -379,7 +379,7 @@ where
     let bbox_cell = Qcell::new(bbox.centroid(), T::zero(), &prepared);
 
     // deciding which initial guess was better
-    let mut best_cell = if bbox_cell.distance < centroid_cell.distance {
+    let mut best_cell = if bbox_cell.distance > centroid_cell.distance {
         bbox_cell
     } else {
         centroid_cell
@@ -415,6 +415,18 @@ mod tests {
     use geo::prelude::*;
     use geo::{LineString, Point, Polygon};
     use std::collections::BinaryHeap;
+
+    #[test]
+    fn coarse_tolerance_keeps_the_better_initial_guess() {
+        let polygon: Polygon<f64> =
+            Polygon::new(vec![(0., 0.), (10., 0.), (0., 10.)].into(), vec![]);
+        // The bounding-box center is on the boundary; the centroid is interior.
+        let anchor = polylabel(&polygon, &10.).unwrap();
+        let centroid = polygon.centroid().unwrap();
+        assert!((anchor.x() - centroid.x()).abs() < 1e-12);
+        assert!((anchor.y() - centroid.y()).abs() < 1e-12);
+    }
+
     #[test]
     // polygons are those used in Shapely's tests
     fn test_polylabel() {
