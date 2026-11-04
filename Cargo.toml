@@ -12,14 +12,15 @@ rust-version = "1.85"
 
 [dependencies]
 libc = {version = "0.2.172", default-features=false, optional = true}
-geo = "0.33.1"
-num-traits = "0.2.19"
+geo-traits = "0.3.0"
+geo-types = "0.7.17"
 thiserror = "2.0.12"
 
 [build-dependencies]
 cbindgen = { version = "0.29.3", default-features=false, optional = true}
 
 [dev-dependencies]
+geo = { version = "0.33.1", default-features = false }
 criterion = "0.8.2"
 
 [features]

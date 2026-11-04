@@ -6,12 +6,10 @@
 //! for finding the optimum position of a polygon label.
 //!
 //! ffi bindings are provided: enable the `ffi` and `headers` features when building the crate.
-use geo::{Coord, Line, LineString, Rect};
-use geo::{GeoFloat, Point, Polygon};
-use num_traits::FromPrimitive;
+use geo_traits::{CoordTrait, LineStringTrait, PolygonTrait};
+use geo_types::{Coord, CoordFloat, Line, Point, Rect};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::iter::Sum;
 use std::ops::{Deref, DerefMut};
 
 pub mod errors;
@@ -28,7 +26,7 @@ pub use crate::ffi::{Array, Position, WrapperArray, polylabel_ffi};
 #[derive(Debug, Copy, Clone)]
 struct Qcell<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     // The cell's centroid
     centroid: Point<T>,
@@ -42,7 +40,7 @@ where
 
 impl<T> Qcell<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     fn new(centroid: Point<T>, half_extent: T, prepared: &PreparedPolygon<T>) -> Self {
         let two = T::one() + T::one();
@@ -59,7 +57,7 @@ where
 
 impl<T> Ord for Qcell<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.max_distance.partial_cmp(&other.max_distance).unwrap()
@@ -67,20 +65,20 @@ where
 }
 impl<T> PartialOrd for Qcell<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
-impl<T> Eq for Qcell<T> where T: GeoFloat {}
+impl<T> Eq for Qcell<T> where T: CoordFloat {}
 impl<T> PartialEq for Qcell<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     fn eq(&self, other: &Self) -> bool
     where
-        T: GeoFloat,
+        T: CoordFloat,
     {
         self.max_distance == other.max_distance
     }
@@ -94,7 +92,7 @@ const BLOCK_SIZE: usize = 32;
 /// call so the per-cell distance scan can skip whole blocks of edges in O(1).
 struct PreparedPolygon<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     rings: Vec<PreparedRing<T>>,
 }
@@ -102,7 +100,7 @@ where
 /// A single ring's edges and the bounding box of each consecutive block of them
 struct PreparedRing<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     lines: Vec<Line<T>>,
     blocks: Vec<Rect<T>>,
@@ -110,12 +108,14 @@ where
 
 impl<T> PreparedPolygon<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
-    fn new(polygon: &Polygon<T>) -> Self {
-        let rings = std::iter::once(polygon.exterior())
+    fn new(polygon: &impl PolygonTrait<T = T>) -> Self {
+        let rings = polygon
+            .exterior()
+            .into_iter()
             .chain(polygon.interiors())
-            .map(PreparedRing::new)
+            .map(|ring| PreparedRing::new(&ring))
             .collect();
         Self { rings }
     }
@@ -169,7 +169,7 @@ where
 
 impl<T> PreparedRing<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     /// Follows geo's shifted shoelace sum, omitting the first zero determinant.
     fn signed_area(&self) -> T {
@@ -193,8 +193,21 @@ where
         accumulated / (T::from(6).unwrap() * area) + shift
     }
 
-    fn new(ring: &LineString<T>) -> Self {
-        let lines: Vec<Line<T>> = ring.lines().collect();
+    fn new(ring: &impl LineStringTrait<T = T>) -> Self {
+        let mut coords = ring.coords().map(|c| Coord { x: c.x(), y: c.y() });
+        let mut lines = Vec::with_capacity(ring.num_coords());
+        if let Some(first) = coords.next() {
+            let mut previous = first;
+            for coord in coords {
+                lines.push(Line::new(previous, coord));
+                previous = coord;
+            }
+            // Trait implementations may expose open rings; close them just as
+            // geo_types::Polygon::new does, without allocating a coordinate copy.
+            if previous != first {
+                lines.push(Line::new(previous, first));
+            }
+        }
         let blocks = lines.chunks(BLOCK_SIZE).map(block_bbox).collect();
         Self { lines, blocks }
     }
@@ -203,7 +216,7 @@ where
 /// Bounding box enclosing every endpoint of a block of edges
 fn block_bbox<T>(lines: &[Line<T>]) -> Rect<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     let mut min_x = T::infinity();
     let mut min_y = T::infinity();
@@ -239,7 +252,7 @@ where
 /// this skips the bulk of the edges.
 fn signed_distance<T>(point: Point<T>, prepared: &PreparedPolygon<T>) -> T
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     let x = point.x();
     let y = point.y();
@@ -302,7 +315,7 @@ where
 
 /// Euclidean distance to a segment, including repeated vertices.
 /// Follows geo's `geo_types::private_utils::line_segment_distance` implementation.
-fn segment_distance<T: GeoFloat>(point: Point<T>, line: &Line<T>) -> T {
+fn segment_distance<T: CoordFloat>(point: Point<T>, line: &Line<T>) -> T {
     let point = point.0;
     let start = line.start;
     let end = line.end;
@@ -325,11 +338,11 @@ fn segment_distance<T: GeoFloat>(point: Point<T>, line: &Line<T>) -> T {
 
 struct QuadTree<T>(pub BinaryHeap<Qcell<T>>)
 where
-    T: GeoFloat;
+    T: CoordFloat;
 
 impl<T> Deref for QuadTree<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     type Target = BinaryHeap<Qcell<T>>;
     fn deref(&self) -> &Self::Target {
@@ -338,7 +351,7 @@ where
 }
 impl<T> DerefMut for QuadTree<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -347,7 +360,7 @@ where
 
 impl<T> QuadTree<T>
 where
-    T: GeoFloat,
+    T: CoordFloat,
 {
     pub fn new(bbox: Rect<T>, half_extent: T, prepared: &PreparedPolygon<T>) -> Self {
         let mut cell_queue: BinaryHeap<Qcell<T>> = BinaryHeap::new();
@@ -396,6 +409,10 @@ where
 ///
 /// The calculation uses an [iterative grid-based algorithm](https://github.com/mapbox/polylabel#how-the-algorithm-works).
 ///
+/// Accepts any [`PolygonTrait`] implementation, including borrowed geometry
+/// views. Only XY coordinates are used. Open rings are closed implicitly.
+/// The result is a [`geo_types::Point`].
+///
 /// # Examples
 ///
 /// ```
@@ -429,9 +446,12 @@ where
 /// The tolerance must be a positive number: zero, negative, or NaN tolerances
 /// return [`PolylabelError::InvalidTolerance`], since the refinement loop
 /// cannot be guaranteed to terminate for them.
-pub fn polylabel<T>(polygon: &Polygon<T>, tolerance: &T) -> Result<Point<T>, PolylabelError>
+pub fn polylabel<T>(
+    polygon: &impl PolygonTrait<T = T>,
+    tolerance: &T,
+) -> Result<Point<T>, PolylabelError>
 where
-    T: GeoFloat + FromPrimitive + Sum,
+    T: CoordFloat,
 {
     // A non-positive or NaN tolerance can subdivide forever: cells at the pole
     // keep max_distance - best_distance positive (or the comparison is always

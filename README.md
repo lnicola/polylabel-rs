@@ -29,6 +29,21 @@ let poly = Polygon::new(coords.into(), vec![]);
 let label_pos = polylabel(&poly, &0.10);
 // Point(0.5625, 0.5625)
 ```
+
+`polylabel` accepts any `geo_traits::PolygonTrait` implementation, including
+GeoArrow polygon scalars, without converting the input into `geo_types::Polygon`.
+It reads XY coordinates and returns a `geo_types::Point`; open rings are closed
+implicitly. The search still allocates its prepared edges and priority queue.
+
+For example, with `geoarrow-array` and a `PolygonArray` named `polygons`:
+
+```rust,ignore
+use geoarrow_array::GeoArrowArrayAccessor;
+
+let polygon = polygons.get(0)?.expect("non-null polygon");
+let label_pos = polylabel::polylabel(&polygon, &0.1)?;
+```
+
 ## Command-Line Tool
 A command-line tool is available: `cargo install polylabel_cmd`. This enables the `polylabel` command, which takes a GeoJSON file as input, as well as an optional (`-t / --tolerance`) tolerance value. See more at [crates.io](https://crates.io/crates/polylabel_cmd).
 
