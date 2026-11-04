@@ -6,7 +6,7 @@
 //! for finding the optimum position of a polygon label.
 //!
 //! ffi bindings are provided: enable the `ffi` and `headers` features when building the crate.
-use geo::{Coord, Line, LineString, Rect, prelude::*};
+use geo::{Coord, Line, LineString, Rect};
 use geo::{GeoFloat, Point, Polygon};
 use num_traits::FromPrimitive;
 use std::cmp::Ordering;
@@ -119,12 +119,80 @@ where
             .collect();
         Self { rings }
     }
+
+    /// Follows geo's polygon area and area-weighted ring centroid calculations.
+    fn area_and_centroid(&self) -> (T, Option<Point<T>>) {
+        let Some((exterior, interiors)) = self.rings.split_first() else {
+            return (T::zero(), None);
+        };
+        let exterior_area = exterior.signed_area();
+        let mut area = exterior_area.abs();
+        let mut interior_centroid: Option<(T, Coord<T>)> = None;
+        for ring in interiors {
+            let ring_area = ring.signed_area();
+            let weight = ring_area.abs();
+            area = area - weight;
+            if ring_area == T::zero() {
+                continue;
+            }
+            let accumulated = ring.centroid(ring_area) * weight;
+            if let Some((total_weight, total_accumulated)) = &mut interior_centroid {
+                *total_weight = *total_weight + weight;
+                *total_accumulated = *total_accumulated + accumulated;
+            } else {
+                interior_centroid = Some((weight, accumulated));
+            }
+        }
+        if exterior_area < T::zero() {
+            area = -area;
+        }
+        // polylabel returns early for zero-area polygons, so their line/point
+        // centroid fallbacks are unnecessary here.
+        if area == T::zero() || exterior_area == T::zero() {
+            return (area, None);
+        }
+        let mut weight = exterior_area.abs();
+        let mut accumulated = exterior.centroid(exterior_area) * weight;
+        if let Some((interior_weight, interior_accumulated)) = interior_centroid {
+            weight = weight - interior_weight;
+            accumulated = accumulated - interior_accumulated;
+        }
+        let centroid = (weight != T::zero()).then(|| Point::from(accumulated / weight));
+        (area, centroid)
+    }
+
+    fn bounding_rect(&self) -> Option<Rect<T>> {
+        let ring = self.rings.first()?;
+        (!ring.lines.is_empty()).then(|| block_bbox(&ring.lines))
+    }
 }
 
 impl<T> PreparedRing<T>
 where
     T: GeoFloat,
 {
+    /// Follows geo's shifted shoelace sum, omitting the first zero determinant.
+    fn signed_area(&self) -> T {
+        let Some(first) = self.lines.first() else {
+            return T::zero();
+        };
+        let sum = self.lines.iter().skip(1).fold(T::zero(), |sum, line| {
+            let shifted = Line::new(line.start - first.start, line.end - first.start);
+            sum + shifted.determinant()
+        });
+        sum / (T::one() + T::one())
+    }
+
+    /// Follows geo's nonzero-area ring centroid, before area weighting.
+    fn centroid(&self, area: T) -> Coord<T> {
+        let shift = self.lines[0].start;
+        let accumulated = self.lines.iter().fold(Coord::zero(), |accum, line| {
+            let shifted = Line::new(line.start - shift, line.end - shift);
+            accum + (shifted.end + shifted.start) * shifted.determinant()
+        });
+        accumulated / (T::from(6).unwrap() * area) + shift
+    }
+
     fn new(ring: &LineString<T>) -> Self {
         let lines: Vec<Line<T>> = ring.lines().collect();
         let blocks = lines.chunks(BLOCK_SIZE).map(block_bbox).collect();
@@ -372,12 +440,17 @@ where
         return Err(PolylabelError::InvalidTolerance);
     }
 
+    // Decompose rings into blocks of edges once, up front. All calculations
+    // consume this prepared representation rather than an owned input polygon.
+    let prepared = PreparedPolygon::new(polygon);
+    let (area, centroid) = prepared.area_and_centroid();
+
     // special case for degenerate polygons
-    if polygon.signed_area() == T::zero() {
+    if area == T::zero() {
         return Ok(Point::new(T::zero(), T::zero()));
     }
 
-    let bbox = polygon
+    let bbox = prepared
         .bounding_rect()
         .ok_or(PolylabelError::RectCalculation)?;
     let cell_size = bbox.width().min(bbox.height());
@@ -389,17 +462,12 @@ where
     let two = T::one() + T::one();
     let mut half_extent = cell_size / two;
 
-    // decompose the rings into blocks of edges once, up front
-    let prepared = PreparedPolygon::new(polygon);
-
     // initial best guess using centroid
-    let centroid = polygon
-        .centroid()
-        .ok_or(PolylabelError::CentroidCalculation)?;
+    let centroid = centroid.ok_or(PolylabelError::CentroidCalculation)?;
     let centroid_cell = Qcell::new(centroid, T::zero(), &prepared);
 
     // special case guess for rectangular polygons
-    let bbox_cell = Qcell::new(bbox.centroid(), T::zero(), &prepared);
+    let bbox_cell = Qcell::new(bbox.center().into(), T::zero(), &prepared);
 
     // deciding which initial guess was better
     let mut best_cell = if bbox_cell.distance > centroid_cell.distance {
@@ -438,6 +506,45 @@ mod tests {
     use geo::prelude::*;
     use geo::{LineString, Point, Polygon};
     use std::collections::BinaryHeap;
+
+    #[test]
+    fn prepared_area_and_centroid_match_geo_with_holes_and_large_offsets() {
+        use super::PreparedPolygon;
+        for offset in [0., 1e8] {
+            for winding in 0..8 {
+                let ring = |points: &[(f64, f64)], reverse: bool| {
+                    let mut points: Vec<_> = points
+                        .iter()
+                        .map(|&(x, y)| (x + offset, y + offset))
+                        .collect();
+                    if reverse {
+                        points.reverse();
+                    }
+                    LineString::from(points)
+                };
+                let polygon = Polygon::new(
+                    ring(
+                        &[(0.1, -0.2), (20.3, 0.4), (18.2, 21.8), (-0.4, 19.7)],
+                        winding & 1 != 0,
+                    ),
+                    vec![
+                        ring(
+                            &[(1.1, 1.2), (1.3, 3.4), (4.5, 3.6), (4.7, 1.8)],
+                            winding & 2 != 0,
+                        ),
+                        ring(
+                            &[(10.1, 10.2), (10.3, 13.4), (14.5, 13.6), (14.7, 10.8)],
+                            winding & 4 != 0,
+                        ),
+                        ring(&[(5., 5.), (6., 6.), (7., 7.)], false),
+                    ],
+                );
+                let (area, centroid) = PreparedPolygon::new(&polygon).area_and_centroid();
+                assert_eq!(area, polygon.signed_area());
+                assert_eq!(centroid, polygon.centroid());
+            }
+        }
+    }
 
     #[test]
     fn segment_distances_match_geo_including_repeated_vertices() {
